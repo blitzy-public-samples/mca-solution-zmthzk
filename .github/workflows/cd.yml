@@ -1,0 +1,71 @@
+name: Continuous Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  BACKEND_IMAGE: gcr.io/${{ secrets.GCP_PROJECT_ID }}/backend
+  FRONTEND_BUCKET: ${{ secrets.GCP_FRONTEND_BUCKET }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Set up Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v0.2.1
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        export_default_credentials: true
+
+    - name: Authenticate with Google Cloud
+      run: gcloud auth configure-docker
+
+    - name: Build and push Docker images
+      run: |
+        docker build -t $BACKEND_IMAGE:${{ github.sha }} ./backend
+        docker push $BACKEND_IMAGE:${{ github.sha }}
+
+    - name: Deploy backend to Google Cloud Run
+      run: |
+        gcloud run deploy backend \
+          --image $BACKEND_IMAGE:${{ github.sha }} \
+          --platform managed \
+          --region us-central1 \
+          --allow-unauthenticated
+
+    - name: Deploy frontend to Google Cloud Storage
+      run: |
+        gsutil -m rsync -r ./frontend/build gs://$FRONTEND_BUCKET
+        gsutil web set -m index.html -e 404.html gs://$FRONTEND_BUCKET
+
+    - name: Set up load balancing for frontend
+      run: |
+        gcloud compute backend-buckets create frontend-bucket --gcs-bucket-name=$FRONTEND_BUCKET
+        gcloud compute url-maps create frontend-lb --default-backend-bucket=frontend-bucket
+        gcloud compute target-http-proxies create frontend-proxy --url-map=frontend-lb
+        gcloud compute forwarding-rules create frontend-http --target-http-proxy=frontend-proxy --ports=80
+
+    - name: Run post-deployment tests
+      run: |
+        # HUMAN ASSISTANCE NEEDED
+        # Add post-deployment test commands here
+        # Example: npm run test:e2e
+
+    - name: Notify team of deployment status
+      if: always()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: Deployment to GCP ${{ job.status }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
